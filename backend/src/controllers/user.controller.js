@@ -1,7 +1,10 @@
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
-import { uploadToCloudinary } from "../utils/cloudinary.js";
+import {
+  uploadToCloudinary,
+  deleteFromCloudinary,
+} from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken";
 
@@ -16,7 +19,7 @@ const generateAccessAndRefreshTokens = async (userId) => {
 
     return { accessToken, refreshToken };
   } catch (error) {
-    throw new Error(500, "Error generating Access and Refresh tokens");
+    throw new ApiError(500, "Error generating Access and Refresh tokens");
   }
 };
 
@@ -46,9 +49,9 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new ApiError(409, "User with given email or username already exists");
   }
 
-  const avatarLoacalPath = req.files?.avatar[0]?.path || null;
+  const avatarLocalPath = req.files?.avatar[0]?.path || null;
 
-  if (!avatarLoacalPath) {
+  if (!avatarLocalPath) {
     throw new ApiError(400, "Avatar image is required");
   }
 
@@ -61,16 +64,19 @@ const registerUser = asyncHandler(async (req, res) => {
     coverImageLocalPath = req.files.coverImage[0].path;
   }
 
-  const avatar = await uploadToCloudinary(avatarLoacalPath);
-  const coverImage = await uploadToCloudinary(coverImageLocalPath);
+  const avatar = await uploadToCloudinary(avatarLocalPath, {
+    folder: "avatars",
+    public_id: username.toLowerCase(),
+  });
 
   if (!avatar) {
     throw new ApiError(400, "Failed to upload avatar image");
   }
+  const coverImage = await uploadToCloudinary(coverImageLocalPath);
 
   const user = await User.create({
     fullName,
-    avatar: avatar.url,
+    avatar: { url: avatar.url, public_id: avatar.public_id },
     coverImage: coverImage?.url || "",
     email,
     password,
@@ -127,7 +133,7 @@ const loginUser = asyncHandler(async (req, res) => {
 
   const options = {
     httpOnly: true,
-    secure: true,
+    secure: process.env.NODE_ENV === "production",
   };
 
   return res
@@ -156,7 +162,7 @@ const logoutUser = asyncHandler(async (req, res) => {
 
   const options = {
     httpOnly: true,
-    secure: true,
+    secure: process.env.NODE_ENV === "production",
   };
 
   return res
@@ -192,20 +198,21 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
 
     const options = {
       httpOnly: true,
-      secure: true,
+      secure: process.env.NODE_ENV === "production",
     };
 
-    const { accessToken, newRefreshToken } =
-      await generateAccessAndRefreshTokens(user._id);
+    const { accessToken, refreshToken } = await generateAccessAndRefreshTokens(
+      user._id
+    );
 
     return res
       .status(200)
       .cookie("accessToken", accessToken, options)
-      .cookie("refreshToken", newRefreshToken, options)
+      .cookie("refreshToken", refreshToken, options)
       .json(
         new ApiResponse(
           200,
-          { accessToken, newRefreshToken },
+          { accessToken, refreshToken },
           "Access token refreshed successfully"
         )
       );
@@ -272,19 +279,34 @@ const updateUserAvatar = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Avatar image is required");
   }
 
-  const avatar = await uploadToCloudinary(avatarLocalPath);
+  const existinguser = await User.findById(req.user._id);
 
-  if (!avatar.url) {
+  if (!existinguser) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const oldAvatarPublicId = existinguser.avatar?.public_id;
+
+  const avatar = await uploadToCloudinary(avatarLocalPath, {
+    folder: "avatars",
+    public_id: req.user._id,
+  });
+
+  if (!avatar?.url) {
     throw new ApiError(400, "Failed to upload avatar image");
   }
 
   const user = await User.findByIdAndUpdate(
     req.user._id,
     {
-      $set: { avatar: avatar.url },
+      $set: { avatar: { url: avatar.url, public_id: avatar.public_id } },
     },
     { new: true }
   ).select("-password");
+
+  if (oldAvatarPublicId) {
+    await deleteFromCloudinary(oldAvatarPublicId);
+  }
 
   return res
     .status(200)
